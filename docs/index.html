@@ -109,6 +109,10 @@
   #shot { font-variant-numeric: tabular-nums; }
   #shot b { color: var(--accent); }
   #shot .row { font-family: var(--num); font-size: 11px; opacity: 0.85; }
+  .pop { position: fixed; z-index: 30; pointer-events: none; font: 700 20px var(--num); color: #ffe27a; letter-spacing: 0.02em;
+    text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.7); animation: popUp 0.9s ease-out forwards; }
+  .pop.hi { color: #ff9a4a; font-size: 24px; }
+  @keyframes popUp { 0% { opacity: 0; transform: translate(-50%, -30%) scale(0.8); } 15% { opacity: 1; transform: translate(-50%, -70%) scale(1.15); } 100% { opacity: 0; transform: translate(-50%, -200%) scale(1); } }
   #cross {
     position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px;
     border-radius: 50%; background: var(--hud-fg); box-shadow: 0 0 2px #000;
@@ -232,6 +236,7 @@
     </div>
     <ul class="list" id="optList">
       <li>弾筋：<span class="opts" data-k="tracer"><button data-v="none">なし</button><button data-v="white">白</button><button data-v="red">赤</button></span></li>
+      <li id="scenLi">都市の状況：<span class="opts" data-k="scenario"><button data-v="casual">カジュアル（敵多数）</button><button data-v="long">長距離（敵1人）</button></span></li>
       <li>通過点マーク：<span class="opts" data-k="wall"><button data-v="on">表示する</button><button data-v="off">表示しない</button></span></li>
     </ul>
   </div>
@@ -324,6 +329,7 @@ function vnoise(x, z) {
 }
 function fbm(x, z) { let s = 0, a = 1, f = 1; for (let i = 0; i < 4; i++) { s += a * vnoise(x * f, z * f); a *= 0.5; f *= 2; } return s / 1.875; }
 let stage = 'range';
+const CITY = { scenario: 'casual' };   // 都市ステージの状況：casual＝敵が多数で近め／long＝敵1人で3,540m
 function heightAt(x, z) { return stage === 'city' ? cityHeightAt(x, z) : rangeHeightAt(x, z); }
 function rangeHeightAt(x, z) {
   const side = Math.max(0, Math.abs(x) - LANE_HALF);
@@ -635,14 +641,22 @@ function buildSoldier() {
 }
 const enemies = [];
 const OPS = { down: 0, fled: 0, wounded: 0 };
+const CITY_COUNT = { casual: 10, long: 1 };
 function spawnEnemy(onTarget) {
+  const long = CITY.scenario === 'long';
+  if (enemies.length >= CITY_COUNT[CITY.scenario]) return;      // 状況ごとの人数を超えて出さない
+  if (long) onTarget = true;                                    // 長距離：敵は3,540m先の1人だけ
   const camP = new THREE.Vector3(0, 0, -8);
-  const cands = cityRoofs.filter(r => onTarget ? r.target : (!r.target && Math.abs(r.x) < 900 && r.w > 12 && r.d > 12 && Math.hypot(r.x - camP.x, r.z - camP.z) > 350));
+  // カジュアル：射撃位置から100〜1,200mの屋上。近い屋上ほど選ばれやすい
+  const cands = onTarget ? cityRoofs.filter(r => r.target)
+    : cityRoofs.filter(r => !r.target && Math.abs(r.x) < 700 && r.w > 10 && r.d > 10).map(r => [r, Math.hypot(r.x - camP.x, r.z - camP.z)])
+        .filter(x => x[1] > 100 && x[1] < 1200).sort((a, b) => a[1] - b[1]).map(x => x[0]);
   // 射撃位置から見通せる屋上だけを選ぶ（建物の陰に隠れた敵兵は出さない）
   const eye = new THREE.Vector3(0, CITY_ROOF + EYE_H + 0.2, -8.2), losRay = new THREE.Raycaster();
   let roof = null;
   for (let tries = 0; tries < 30 && cands.length; tries++) {
-    const rf = cands[Math.floor(Math.random() * cands.length)];
+    const rf = cands[Math.floor((onTarget ? Math.random() : Math.pow(Math.random(), 1.5)) * cands.length)];
+    if (!onTarget && enemies.some(e => e.roof === rf)) continue;     // 同じ屋上に重ねない
     const tgt = new THREE.Vector3(rf.x, rf.top + 1.2, rf.z), dir = tgt.clone().sub(eye), dist = dir.length();
     cityGroup.updateMatrixWorld(true);
     losRay.set(eye, dir.normalize()); losRay.near = 30; losRay.far = dist - Math.max(rf.w, rf.d) * 0.5 - 2;
@@ -809,9 +823,13 @@ function setStage(st, quiet) {
   while (bears.length) removeBear(bears[0]);
   if (huntMode) for (let i = 0; i < 3; i++) spawnBear();
   while (enemies.length) removeEnemy(enemies[0]);
-  if (st === 'city') { spawnEnemy(true); for (let i = 0; i < 4; i++) spawnEnemy(false); }
+  if (st === 'city') populateCity();
   if (st === 'city') { camera.position.set(0, CITY_ROOF + EYE_H + 0.2, -8.2); yaw = 0; pitch = 0; if (weaponIdx === 0 && !quiet) setWeapon(1); }
   else camera.position.set(0, EYE_H + 0.2, 2);
+}
+function populateCity() {   // 状況に合わせて敵を配置し直す
+  while (enemies.length) removeEnemy(enemies[0]);
+  if (CITY.scenario === 'long') spawnEnemy(true); else for (let i = 0; i < CITY_COUNT.casual; i++) spawnEnemy(false);
 }
 function setHunt(on) { setStage(on ? 'hunt' : 'range'); }
 function startle(b, delay) {
@@ -1683,11 +1701,12 @@ function setWeapon(i) {
 const OPT = { tracer: 'none', wall: 'off' };   // 弾筋の色・通過点マークは最初は出さない
 const setEl = document.getElementById('settings');
 const WEAPON_DESC = ['半自動・7.62×51・3.5〜10倍', 'ボルト式・.50口径・7〜35倍', '架空・赤色レーザー・5〜40倍', 'ボルト式・7.62×54R・3.5倍固定', '半自動・.50口径・10発・7〜35倍'];
-const STAGE_LIST = [['range', '射撃場', '鉄板と看板・最大3,540m'], ['hunt', '猟場（ヒグマ）', 'ヒグマ3頭・180〜2,300m'], ['city', '都市（3,540m）', '屋上40m・敵兵・最大4km']];
+const STAGE_LIST = [['range', '射撃場', '鉄板と看板・最大3,540m'], ['hunt', '猟場（ヒグマ）', 'ヒグマ3頭・180〜2,300m'], ['city', '都市（3,540m）', '屋上40m・敵兵・状況を選べる']];
 const THUMBS = { weapon: [], stage: {} };
 const pickEl = document.getElementById('pick'), catsEl = document.getElementById('cats'), cardsEl = document.getElementById('cards');
 function syncSettings() {
-  setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === OPT[g.dataset.k])));
+  setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (g.dataset.k === 'scenario' ? CITY.scenario : OPT[g.dataset.k]))));
+  document.getElementById('scenLi').hidden = stage !== 'city';   // 状況の選択は都市ステージのときだけ
   document.getElementById('catWName').textContent = weapon.label; document.getElementById('catSName').textContent = STAGE_NAME[stage];
   if (THUMBS.weapon[weaponIdx]) document.getElementById('catWImg').src = THUMBS.weapon[weaponIdx];
   if (THUMBS.stage[stage]) document.getElementById('catSImg').src = THUMBS.stage[stage];
@@ -1708,7 +1727,10 @@ function closePick() { catsEl.hidden = false; pickEl.hidden = true; }
 setEl.querySelectorAll('.cat').forEach(c => c.addEventListener('click', e => { e.stopPropagation(); openPick(c.dataset.cat); }));
 document.getElementById('pickBack').addEventListener('click', e => { e.stopPropagation(); closePick(); });
 setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
-  e.stopPropagation(); OPT[g.dataset.k] = b.dataset.v; syncSettings();
+  e.stopPropagation();
+  if (g.dataset.k === 'scenario') { if (CITY.scenario !== b.dataset.v) { CITY.scenario = b.dataset.v; if (stage === 'city') populateCity(); } }
+  else OPT[g.dataset.k] = b.dataset.v;
+  syncSettings();
 })));
 ['touchstart', 'mousedown'].forEach(ev => setEl.addEventListener(ev, e => e.stopPropagation(), { passive: true }));
 const openSettings = () => { if (S.aiming) toggleAim(); closePick(); syncSettings(); setEl.hidden = false; };
@@ -1844,6 +1866,12 @@ function buildAudio() {
     }
     nz(t + 0.2, 4.0, 0.12, 'lowpass', 300, 40, 0.7, null, 0.6);          // 地鳴りのような余韻
   };
+  sfx.hit = (heavy) => {                                      // 命中確認の「プツッ」（急所は低く重い「ブツッ」）
+    const t = A.currentTime;
+    nz(t, 0.03, 0.55, 'bandpass', heavy ? 1500 : 2400, heavy ? 600 : 1000, 2.5);
+    tone(t, 'triangle', heavy ? 520 : 760, heavy ? 150 : 260, 0.05, 0.4);
+    if (heavy) tone(t + 0.012, 'sine', 1900, 1500, 0.06, 0.18);
+  };
   sfx.click = () => { const t = A.currentTime; nz(t, 0.012, 0.18, 'bandpass', 4200, 4200, 8); };
   sfx.dry = () => { const t = A.currentTime; nz(t, 0.02, 0.3, 'bandpass', 2600, 2600, 6); };
   sfx.magOut = d => { const t = A.currentTime + d; nz(t, 0.025, 0.4, 'bandpass', 2000, 2000, 5); nz(t + 0.05, 0.08, 0.2, 'bandpass', 900, 600, 2); };
@@ -1918,13 +1946,13 @@ function g7cd(M) {
 }
 // 弾の種類（銃の見た目はM110のまま、弾道だけ切り替える）
 const AMMO = {
-  m118: { key: 'm118', short: 'M110', name: '7.62×51 M118LR', v0: 783, bcG7: 0.25, mass: 0.01134, sightH: 0.065, sg: 1.7, zoomMin: 3.5, zoomMax: 10, recoil: 1, boom: 1 },
+  m118: { key: 'm118', cal: 0.00762, short: 'M110', name: '7.62×51 M118LR', v0: 783, bcG7: 0.25, mass: 0.01134, sightH: 0.065, sg: 1.7, zoomMin: 3.5, zoomMax: 10, recoil: 1, boom: 1 },
   // TAC-50：.50 BMG Hornady 750gr A-MAX、初速823m/s。G7弾道係数0.50は推定値
-  bmg: { key: 'bmg', short: 'TAC-50', name: '.50 BMG 750gr A-MAX', v0: 823, bcG7: 0.50, mass: 0.0486, sightH: 0.07, sg: 1.6, zoomMin: 7, zoomMax: 35, recoil: 1.6, boom: 1.6 },
+  bmg: { key: 'bmg', cal: 0.0127, short: 'TAC-50', name: '.50 BMG 750gr A-MAX', v0: 823, bcG7: 0.50, mass: 0.0486, sightH: 0.07, sg: 1.6, zoomMin: 7, zoomMax: 35, recoil: 1.6, boom: 1.6 },
   // 架空：PX-20 の20mm炸裂弾。初速1150m/s・125g（ゲーム用の設定値）
   // モシン・ナガン：7.62×54R 軽弾 148gr、初速865m/s。G7弾道係数0.19は推定。PUスコープは3.5倍固定
-  mosin: { key: 'mosin', short: 'モシン', name: '7.62×54R 軽弾', v0: 865, bcG7: 0.19, mass: 0.0096, sightH: 0.057, sg: 1.5, zoomMin: 3.5, zoomMax: 3.5, recoil: 1.3, boom: 1.2 },
-  px: { key: 'px', short: 'PX-20', name: '赤色レーザー（架空）', v0: 1150, bcG7: 0.62, mass: 0.125, sightH: 0.075, sg: 1.8, zoomMin: 5, zoomMax: 40, recoil: 2.4, boom: 2.6, explosive: true },
+  mosin: { key: 'mosin', cal: 0.00762, short: 'モシン', name: '7.62×54R 軽弾', v0: 865, bcG7: 0.19, mass: 0.0096, sightH: 0.057, sg: 1.5, zoomMin: 3.5, zoomMax: 3.5, recoil: 1.3, boom: 1.2 },
+  px: { key: 'px', cal: 0.02, short: 'PX-20', name: '赤色レーザー（架空）', v0: 1150, bcG7: 0.62, mass: 0.125, sightH: 0.075, sg: 1.8, zoomMin: 5, zoomMax: 40, recoil: 2.4, boom: 2.6, explosive: true },
 };
 let ammo = AMMO.m118, KDRAG = 0, ZERO_ANGLE = 0;
 // 地球の自転（コリオリの力）：北緯36°で真北へ撃つ想定
@@ -2005,7 +2033,7 @@ const traceMat = new THREE.ShaderMaterial({
       return mix(mix(h(i),h(i+vec2(1,0)),u.x), mix(h(i+vec2(0,1)),h(i+vec2(1,1)),u.x), u.y); }
     void main(){
       float across = 1.0 - abs(vSide);
-      float a = vAlpha * smoothstep(0.0, 0.7, across);
+      float a = vAlpha * smoothstep(0.0, 1.0, across);   // 弾道の軸が一番濃く、外へ向かって滑らかに消える
       vec2 q = vec2(vDist*0.35 - uTime*9.0, vSide*1.6);
       vec2 n = vec2(n2(q), n2(q+vec2(19.3,7.1))) - 0.5;
       n += 0.6*(vec2(n2(q*2.7+5.0), n2(q*2.7+41.0)) - 0.5);
@@ -2024,7 +2052,7 @@ const tracerMat = new THREE.ShaderMaterial({
   vertexShader: `attribute float aAlpha; attribute float aSide; varying float vA; varying float vS;
     void main(){ vA = aAlpha; vS = aSide; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
   fragmentShader: `uniform vec3 uColor; varying float vA; varying float vS;
-    void main(){ float core = exp(-pow(vS*8.0, 2.0)); float a = min(1.0, core * 1.8) * vA; if (a < 0.03) discard; gl_FragColor = vec4(uColor, a); }`   // 弾くらいの細い線（もやは別に残る）
+    void main(){ float core = exp(-pow(vS*5.0, 2.0)); float a = min(1.0, core * 1.8) * vA; if (a < 0.03) discard; gl_FragColor = vec4(uColor, a); }`   // 弾くらいの細い線（もやは別に残る）
 });
 function makeTrail() {
   const geo = new THREE.BufferGeometry();
@@ -2055,7 +2083,7 @@ function updateTrail(tr, now, pxW) {
     tv.c.crossVectors(tv.a, tv.b);
     if (tv.c.lengthSq() < 1e-6) tv.c.set(1, 0, 0).applyQuaternion(camera.quaternion);
     tv.c.normalize();
-    const w = Math.min(3, dist * pxW);                             // 画面上でおよそ一定の太さ
+    const w = Math.min(2, dist * pxW * 0.62);                      // 画面上でおよそ一定の太さ（以前より細く）
     const age = (now - tr.pts[i].t) / TRAIL_SEC;
     const fadeIn = Math.min(1, Math.max(0, (dist - 2) / 12));      // 銃口のすぐ前は出さない
     const a = Math.pow(Math.max(0, 1 - age), 0.6) * deadFade * fadeIn;
@@ -2070,7 +2098,7 @@ function updateTrail(tr, now, pxW) {
   return deadFade > 0;
 }
 
-// ---------- 通過点マーク：標的の距離を弾が通り過ぎた位置に、弾痕のような赤い印を数秒残す ----------
+// ---------- 通過点マーク：外れた弾が標的の近く（中心から半径5m以内）をかすめたとき、その位置の空中に弾痕のような赤い印を数秒残す ----------
 const zoneRay = new THREE.Raycaster();
 const ZONE = { g: new THREE.Group(), t: -1, mark: null, lines: null };
 {
@@ -2089,12 +2117,13 @@ const ZONE = { g: new THREE.Group(), t: -1, mark: null, lines: null };
 }
 function showZone(b, P) {
   if (OPT.wall !== 'on' || !b.zoneA) return;
-  const A = b.zoneA, D = b.zoneD, mil = D / 1000;                        // 1ミルの長さ（m）
+  const A = b.zoneObj ? b.zoneObj.getWorldPosition(new THREE.Vector3()) : b.zoneA, D = b.zoneD, mil = D / 1000;   // 標的が動いていても、通過した時点の中心を基準にする                        // 1ミルの長さ（m）
   ZONE.g.position.copy(A); ZONE.g.scale.setScalar(mil);
   ZONE.g.lookAt(b.eye.x, A.y, b.eye.z);
   ZONE.mark.position.copy(P);
   const rt = new THREE.Vector3().subVectors(b.eye, A).setY(0).normalize(); const right = new THREE.Vector3(rt.z, 0, -rt.x);   // 射手から見て右
   const dx = new THREE.Vector3().subVectors(P, A).dot(right), dy = P.y - A.y;
+  if (Math.hypot(dx, dy) > 5) return;                                    // 標的の中心から半径5mより外は「かすめた」とは言えないので出さない
   b.wallTxt = `通過点 ${D.toFixed(0)}m 上下${dy >= 0 ? '+' : '−'}${Math.abs(dy / mil).toFixed(1)}・左右${dx >= 0 ? '+' : '−'}${Math.abs(dx / mil).toFixed(1)}`;
   ZONE.g.visible = false; ZONE.mark.visible = true; ZONE.t = 0;   // 格子は出さず、通過位置に弾痕の印だけ
   shotEl.innerHTML = `<div class="row">${b.wallTxt} ミル</div>`; showShot();
@@ -2103,7 +2132,7 @@ function updateZone(dt) {
   if (ZONE.t < 0) return;
   ZONE.t += dt; const a = ZONE.t < 3.5 ? 1 : Math.max(0, 1 - (ZONE.t - 3.5) / 1.0);   // 約4秒残る
   ZONE.lines.material.opacity = 0.6 * a; ZONE.face.material.opacity = 0.08 * a; ZONE.mark.material.opacity = a;
-  ZONE.mark.scale.setScalar(0.028 * 2 * Math.tan(camera.fov * Math.PI / 360) * (1 + Math.max(0, 0.2 - ZONE.t) * 3));   // 画面の高さの約3%の点
+  ZONE.mark.scale.setScalar(0.02 * 2 * Math.tan(camera.fov * Math.PI / 360) * (1 + Math.max(0, 0.2 - ZONE.t) * 3));   // 画面の高さの約2%の点
   if (a <= 0) { ZONE.g.visible = ZONE.mark.visible = false; ZONE.t = -1; }
 }
 
@@ -2126,20 +2155,15 @@ function launchBullet() {
   const v0 = ammo.v0;
   const tr = makeTrail(); trails.push(tr);
   tr.pts.push({ p: o.clone().addScaledVector(dir, 0.8), t: simNow, d: 0.8 });
-  // 通過点マーク：照準の近くの標的までの距離を記録
-  // 照準の近く（4ミル以内）に敵兵・クマ・鉄板があれば、その距離に置き、照準点を中心にする
-  let zoneA = null, best = 0.004;
-  const tryPt = (P) => { const d = P.clone().sub(camera.position), L = d.length(), ang = d.normalize().angleTo(f); if (ang < best) { best = ang; zoneA = camera.position.clone().addScaledVector(f, L); } };
+  // 通過点マーク：照準線に一番近い標的（敵兵・クマ・鉄板）を選び、その中心を基準にする
+  let zoneA = null, zoneObj = null, best = 12;   // 照準線から12m以内の標的だけ
+  const tryPt = (P, obj) => { const d = P.clone().sub(camera.position), L = d.length(), lat = L * Math.sin(d.normalize().angleTo(f)); if (lat < best) { best = lat; zoneA = P.clone(); zoneObj = obj; } };
   const tv2 = new THREE.Vector3();
-  for (const ee of enemies) if (ee.state !== 'down') tryPt(ee.zones[1].getWorldPosition(tv2));
-  for (const bb of bears) if (bb.state !== 'dead') tryPt(bb.zones[0].getWorldPosition(tv2));
-  for (const pv of plates) if (shown(pv)) tryPt(pv.children[pv.children.length - 1].getWorldPosition(tv2));
-  if (!zoneA) {   // なければ照準の先に最初に当たる物
-    zoneRay.setFromCamera({ x: 0, y: 0 }, camera); zoneRay.far = 8000;
-    const zh = zoneRay.intersectObjects(hitables.filter(shown), false)[0]; if (zh) zoneA = zh.point.clone();
-  }
+  for (const ee of enemies) if (ee.state !== 'down') tryPt(ee.zones[1].getWorldPosition(tv2), ee.zones[1]);
+  for (const bb of bears) if (bb.state !== 'dead') tryPt(bb.zones[0].getWorldPosition(tv2), bb.zones[0]);
+  for (const pv of plates) if (shown(pv)) { const pl = pv.children[pv.children.length - 1]; tryPt(pl.getWorldPosition(tv2), pl); }
   const zoneD = zoneA ? Math.hypot(zoneA.x - o.x, zoneA.z - o.z) : 0;
-  bullets.push({ zoneD, zoneA, zoneDone: false, p: [o.x, o.y, o.z], v: [dir.x * v0, dir.y * v0, dir.z * v0], t: 0, o, eye: camera.position.clone(), f, u, r, tr, dist: 0,
+  bullets.push({ zoneD, zoneA, zoneObj, zoneDone: false, p: [o.x, o.y, o.z], v: [dir.x * v0, dir.y * v0, dir.z * v0], t: 0, o, eye: camera.position.clone(), f, u, r, tr, dist: 0,
     sd: 0.0254 * 1.25 * (ammo.sg + 1.2), mass: ammo.mass, ex: !!ammo.explosive });
 }
 const downRay = new THREE.Raycaster();
@@ -2156,7 +2180,7 @@ function updateBullets(dt) {
       stepBullet(b, wind.vec, h); b.t += h;
       if (window.__freezeAt && b.t > window.__freezeAt) { window.__freezeAt = 0; window.__freezeFx = true; }
       b.dist += Math.hypot(b.p[0] - px, b.p[1] - py, b.p[2] - pz);
-      if (b.zoneD && !b.zoneDone && Math.hypot(b.p[0] - b.o.x, b.p[2] - b.o.z) >= b.zoneD) { b.zoneDone = true; showZone(b, new THREE.Vector3(b.p[0], b.p[1], b.p[2])); }
+      if (b.zoneD && !b.zoneDone && Math.hypot(b.p[0] - b.o.x, b.p[2] - b.o.z) >= b.zoneD) { b.zoneDone = true; b.zoneP = new THREE.Vector3(b.p[0], b.p[1], b.p[2]); }
       if (k % 6 === 5) b.tr.pts.push({ p: new THREE.Vector3(b.p[0], b.p[1], b.p[2]), t: simNow - dt + (k + 1) * h, d: b.dist });
       const gh = heightAt(b.p[0], b.p[2]);
       if (b.p[1] <= gh) {
@@ -2196,6 +2220,11 @@ function updateBullets(dt) {
       const gh = downRay.intersectObject(g, false)[0];
       hit = { point: gh ? gh.point : groundHit, obj: g, normal: gh ? gh.face.normal.clone().transformDirection(g.matrixWorld) : new THREE.Vector3(0, 1, 0), dir: segD.clone().normalize() };
     }
+    if (b.zoneP) {   // 標的の距離を通過した：標的に当たった（または手前で止まった）なら印は出さない
+      const stopped = hit && (hit.enemy || hit.bear || hit.obj.userData.pivot || Math.hypot(hit.point.x - b.o.x, hit.point.z - b.o.z) < b.zoneD);
+      if (!stopped) showZone(b, b.zoneP);
+      b.zoneP = null;
+    }
     if (hit) {
       b.tr.pts.push({ p: hit.point.clone(), t: simNow, d: b.dist });
       b.tr.dead = simNow;
@@ -2211,36 +2240,44 @@ function updateBullets(dt) {
 // =====================================================================
 function canvasTex(size, draw) { const c = document.createElement('canvas'); c.width = c.height = size; draw(c.getContext('2d'), size); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; }
 const DECAL_TEX = {
+  // どの跡も「中心の穴が板の約42%、割れや飛沫は縁まで」。板の大きさは口径×約3で決まる（addDecal）
   steel: canvasTex(128, (g, n) => {          // 鉛が飛び散った灰色の跡（貫通しない）
     g.translate(n / 2, n / 2);
-    for (let i = 0; i < 40; i++) { const a = Math.random() * 6.28, l = 12 + Math.random() * 46; g.strokeStyle = `rgba(70,72,76,${0.25 + Math.random() * 0.5})`; g.lineWidth = 1 + Math.random() * 3; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * l, Math.sin(a) * l); g.stroke(); }
-    const gr = g.createRadialGradient(0, 0, 0, 0, 0, 16); gr.addColorStop(0, 'rgba(40,40,44,1)'); gr.addColorStop(0.6, 'rgba(95,95,100,0.9)'); gr.addColorStop(1, 'rgba(95,95,100,0)');
-    g.fillStyle = gr; g.beginPath(); g.arc(0, 0, 16, 0, 6.28); g.fill();
+    for (let i = 0; i < 18; i++) { const a = Math.random() * 6.28, l = n * (0.26 + Math.random() * 0.22); g.strokeStyle = `rgba(70,72,76,${0.25 + Math.random() * 0.45})`; g.lineWidth = 1 + Math.random() * 2; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * l, Math.sin(a) * l); g.stroke(); }
+    const R = n * 0.24, gr = g.createRadialGradient(0, 0, 0, 0, 0, R); gr.addColorStop(0, 'rgba(30,30,34,1)'); gr.addColorStop(0.6, 'rgba(85,85,90,0.95)'); gr.addColorStop(1, 'rgba(95,95,100,0)');
+    g.fillStyle = gr; g.beginPath(); g.arc(0, 0, R, 0, 6.28); g.fill();
   }),
   wood: canvasTex(64, (g, n) => {            // 穴＋周りの割れ
     g.translate(n / 2, n / 2);
-    for (let i = 0; i < 10; i++) { const a = Math.random() * 6.28, l = 10 + Math.random() * 18; g.strokeStyle = 'rgba(200,170,120,0.8)'; g.lineWidth = 2; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * l, Math.sin(a) * l); g.stroke(); }
-    g.fillStyle = '#120c08'; g.beginPath(); g.arc(0, 0, 7, 0, 6.28); g.fill();
+    for (let i = 0; i < 8; i++) { const a = Math.random() * 6.28, l = n * (0.26 + Math.random() * 0.2); g.strokeStyle = 'rgba(200,170,120,0.8)'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * l, Math.sin(a) * l); g.stroke(); }
+    g.fillStyle = '#120c08'; g.beginPath(); g.arc(0, 0, n * 0.21, 0, 6.28); g.fill();
   }),
   concrete: canvasTex(64, (g, n) => {        // 欠けた跡
     g.translate(n / 2, n / 2);
     g.fillStyle = 'rgba(150,145,135,0.95)'; g.beginPath();
-    for (let i = 0; i < 12; i++) { const a = i / 12 * 6.28, r = 16 + Math.random() * 12; i ? g.lineTo(Math.cos(a) * r, Math.sin(a) * r) : g.moveTo(Math.cos(a) * r, Math.sin(a) * r); }
-    g.fill(); g.fillStyle = '#3a3733'; g.beginPath(); g.arc(0, 0, 6, 0, 6.28); g.fill();
+    for (let i = 0; i < 12; i++) { const a = i / 12 * 6.28, r = n * (0.34 + Math.random() * 0.14); i ? g.lineTo(Math.cos(a) * r, Math.sin(a) * r) : g.moveTo(Math.cos(a) * r, Math.sin(a) * r); }
+    g.fill(); g.fillStyle = '#3a3733'; g.beginPath(); g.arc(0, 0, n * 0.21, 0, 6.28); g.fill();
   }),
   dirt: canvasTex(64, (g, n) => {            // 掘れた土
     const gr = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
     gr.addColorStop(0, 'rgba(45,32,20,1)'); gr.addColorStop(0.45, 'rgba(92,70,45,0.95)'); gr.addColorStop(1, 'rgba(110,90,60,0)');
     g.fillStyle = gr; g.fillRect(0, 0, n, n);
   }),
+  bear: canvasTex(64, (g, n) => {            // 毛皮・布に空いた小さな穴
+    const gr = g.createRadialGradient(n / 2, n / 2, 0, n / 2, n / 2, n / 2);
+    gr.addColorStop(0, 'rgba(25,8,6,1)'); gr.addColorStop(0.42, 'rgba(60,18,14,0.95)'); gr.addColorStop(0.7, 'rgba(60,18,14,0.3)'); gr.addColorStop(1, 'rgba(60,18,14,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, n, n);
+  }),
 };
-const DECAL_SIZE = { steel: 0.16, wood: 0.05, concrete: 0.08, dirt: 0.35 };
+// 弾痕の大きさ＝口径×約3×威力係数（7.62mm弾で約2.4cm角・.50口径で約5cm角）。材質ごとの補正だけ掛ける
+const DECAL_MUL = { steel: 1, wood: 1, concrete: 1.3, dirt: 1.6, bear: 0.8 };
 const decals = [];
 const DECAL_MAX = 80;
-function addDecal(hit, mat, scale) {
+function addDecal(hit, mat, energyKJ) {
   const tex = DECAL_TEX[mat] || DECAL_TEX.dirt;
   const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshLambertMaterial({ map: tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 }));
-  const s = (DECAL_SIZE[mat] || 0.2) * scale;
+  const cal = (ammo && ammo.cal) || 0.00762, power = Math.min(2.2, 0.85 + 0.12 * Math.sqrt(Math.max(0, energyKJ)));   // 威力が大きいほど傷も少し大きい
+  const s = cal * 3 * power * (DECAL_MUL[mat] || 1);
   m.scale.set(s, s, s);
   m.position.copy(hit.point).addScaledVector(hit.normal, 0.004);
   m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), hit.normal);
@@ -2301,6 +2338,7 @@ function impactFx(hit, mat, energyKJ, range) {
     return;
   } else if (mat === 'bear') {
     for (let i = 0; i < 4; i++) emitSmoke(P.clone(), scatter(N, 0.4, 0.5), 0.9, 0.08, 0.45, 0.35, 0x5a4535);   // 毛と土ぼこりが舞う
+    addDecal(hit, 'bear', energyKJ);
     sfx.impact?.(range / BALL.sound, 'bear', range);
     return;
   } else if (mat === 'wood') {
@@ -2314,7 +2352,7 @@ function impactFx(hit, mat, energyKJ, range) {
     for (let i = 0; i < 18 * big; i++) emitP(chipPool, P.clone(), scatter(N, rnd(0.5, 2.5), rnd(3, 8)), rnd(0.6, 1.3), 0.04, 2.4, 0x4a3a28, 9.8, 0.3);
     for (let i = 0; i < 7; i++) emitSmoke(P.clone().add(new THREE.Vector3(rnd(-0.3, 0.3), 0.1, rnd(-0.3, 0.3))), new THREE.Vector3(rnd(-0.6, 0.6), rnd(1.2, 3.2), rnd(-0.6, 0.6)), rnd(1.8, 2.8), 0.3, rnd(1.8, 3.0) * big, 0.6, 0xa8946c);
   }
-  addDecal(hit, mat, mat === 'dirt' ? big : 1);
+  addDecal(hit, mat, energyKJ);
   sfx.impact?.(range / BALL.sound, mat, range);
 }
 // 炸裂：火の玉・衝撃波の輪・破片・黒煙
@@ -2471,7 +2509,22 @@ function updateBeams(dt, pxW) {
   }
 }
 
+// 標的に命中したとき：「+100」を着弾位置に浮かべ、「プツッ」と鳴らす（死んだ標的への追い撃ちは出さない）
+function hitConfirm(hit) {
+  let pts = 0, heavy = false;
+  if (hit.enemy) { pts = hit.zone === 'head' ? 150 : hit.zone === 'limb' ? 50 : 100; heavy = hit.zone === 'head'; }
+  else if (hit.bear) { heavy = hit.zone === 'head' || hit.zone === 'vital'; pts = heavy ? 150 : 100; }
+  else if (hit.obj.userData.pivot) pts = 100;
+  if (!pts) return;
+  sfx.hit?.(heavy);
+  const q = hit.point.clone().project(camera);
+  const el = document.createElement('div'); el.className = 'pop' + (heavy ? ' hi' : ''); el.textContent = '+' + pts;
+  el.style.left = Math.max(30, Math.min(innerWidth - 30, (q.x * 0.5 + 0.5) * innerWidth)) + 'px';
+  el.style.top = Math.max(40, Math.min(innerHeight - 40, (-q.y * 0.5 + 0.5) * innerHeight)) + 'px';
+  document.body.appendChild(el); setTimeout(() => el.remove(), 950);
+}
 function reportImpact(b, hit) {
+  const alive = hit.enemy ? hit.enemy.state !== 'down' && hit.enemy.state !== 'falling' : hit.bear ? hit.bear.state !== 'dead' && hit.bear.state !== 'dying' : true;
   const d = tmpV.subVectors(hit.point, b.eye);
   const fwd = d.dot(b.f), up = d.dot(b.u), rt = d.dot(b.r);
   const range = Math.hypot(hit.point.x - b.o.x, hit.point.z - b.o.z);
@@ -2481,6 +2534,7 @@ function reportImpact(b, hit) {
     let mat = hit.obj.userData.mat || 'dirt', what = hit.obj.userData.kind || '標的';
     if (hit.enemy) { what = '<b>敵兵（レーザーで無力化）</b>'; enemyHit(hit.enemy, 'torso'); mat = 'bear'; }
     if (hit.bear) { what = '<b>ヒグマ（レーザーで即倒）</b>'; bearHit(hit.bear, 'head'); mat = 'bear'; }
+    if (alive) hitConfirm(hit);
     impactFx(hit, mat, 60, range); explode(hit, range);
     shotEl.innerHTML = `<b>${range.toFixed(0)} m</b> ${what}`; showShot();
     return;
@@ -2498,6 +2552,7 @@ function reportImpact(b, hit) {
     what = hit.zone === 'vital' ? '<b>ヒグマ・急所（心臓・肺）</b>' : hit.zone === 'head' ? '<b>ヒグマ・頭</b>' : 'ヒグマ・胴（手負い）';
     bearHit(hit.bear, hit.zone);
   }
+  if (alive) hitConfirm(hit);
   impactFx(hit, mat, J / 1000, range);
   if (b.ex) { explode(hit, range); what = hit.bear ? '<b>ヒグマ・炸裂弾で即倒</b>' : what + '・炸裂'; }
   for (const bb of bears) if (bb !== hit.bear && bb.g.position.distanceTo(hit.point) < 25) startle(bb, 0);   // 近くに着弾すると驚いて逃げる
