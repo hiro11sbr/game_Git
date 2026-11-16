@@ -109,6 +109,12 @@
   #shot { font-variant-numeric: tabular-nums; }
   #shot b { color: var(--accent); }
   #shot .row { font-family: var(--num); font-size: 11px; opacity: 0.85; }
+  #timeUp { position: fixed; inset: 0; z-index: 40; display: none; align-items: center; justify-content: center; background: rgba(10,12,10,0.55); }
+  #timeUp.show { display: flex; }
+  #timeUp .box { background: var(--hud-bg); border: 1px solid var(--hud-line); border-radius: 12px; padding: 16px 26px; text-align: center; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  #timeUp .big { font: 700 34px var(--num); color: var(--accent); margin: 4px 0; }
+  #timeUp button { font: inherit; margin-top: 8px; padding: 6px 18px; border-radius: 8px; border: 1px solid var(--hud-line); background: var(--btn-on); color: #14160f; font-weight: 700; }
+  #timeLine b.low { color: #ff5a3a; }
   #hitmark { position: fixed; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; pointer-events: none; z-index: 29; opacity: 0; }
   #hitmark::before, #hitmark::after { content: ""; position: absolute; left: 50%; top: 50%; width: 3px; height: 100%; margin-left: -1.5px; margin-top: -50%; background: #fff; box-shadow: 0 0 4px #000; border-radius: 2px; }
   #hitmark::before { transform: rotate(45deg); } #hitmark::after { transform: rotate(-45deg); }
@@ -211,11 +217,12 @@
 <canvas id="scope" hidden></canvas>
 <div id="flash"></div>
 <div id="hitmark"></div>
+<div id="timeUp"><div class="box"><div>タイムアップ</div><div class="big" id="tuScore">0</div><div id="tuBest">最高 0</div><button id="tuAgain" type="button">もう一度</button></div></div>
 <div id="hud">
   <div id="leftcol">
   <div id="info" class="panel">
     <div><b id="modeName">射撃場</b></div>
-    <div id="scoreLine">得点 <b id="scoreNow">0</b>・最高 <b id="scoreBest">0</b></div>
+    <div id="scoreLine">得点 <b id="scoreNow">0</b>・最高 <b id="scoreBest">0</b><span id="timeLine" hidden>・残り <b id="timeLeft">60</b>秒</span></div>
     <div id="pos">—</div>
     <div id="wind"><span id="windArrow">↑</span> <span id="windTxt">風 —</span></div>
   </div>
@@ -258,6 +265,7 @@
     </div>
     <ul class="list" id="optList">
       <li>弾筋：<span class="opts" data-k="tracer"><button data-v="none">なし</button><button data-v="white">白</button><button data-v="red">赤</button></span></li>
+      <li>制限時間：<span class="opts" data-k="timer"><button data-v="off">なし</button><button data-v="60">60秒チャレンジ</button></span></li>
       <li id="scenLi">都市の状況：<span class="opts" data-k="scenario"><button data-v="casual">カジュアル（敵多数）</button><button data-v="long">長距離（敵1人）</button></span></li>
       <li>通過点マーク：<span class="opts" data-k="wall"><button data-v="on">表示する</button><button data-v="off">表示しない</button></span></li>
     </ul>
@@ -1752,7 +1760,7 @@ const STAGE_LIST = [['range', '射撃場', '鉄板と看板・最大3,540m'], ['
 const THUMBS = { weapon: [], stage: {} };
 const pickEl = document.getElementById('pick'), catsEl = document.getElementById('cats'), cardsEl = document.getElementById('cards');
 function syncSettings() {
-  setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (g.dataset.k === 'scenario' ? CITY.scenario : OPT[g.dataset.k]))));
+  setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === (g.dataset.k === 'scenario' ? CITY.scenario : g.dataset.k === 'timer' ? TIMER.mode : OPT[g.dataset.k]))));
   document.getElementById('scenLi').hidden = stage !== 'city';   // 状況の選択は都市ステージのときだけ
   document.getElementById('catWName').textContent = weapon.label; document.getElementById('catSName').textContent = STAGE_NAME[stage];
   if (THUMBS.weapon[weaponIdx]) document.getElementById('catWImg').src = THUMBS.weapon[weaponIdx];
@@ -1775,7 +1783,8 @@ setEl.querySelectorAll('.cat').forEach(c => c.addEventListener('click', e => { e
 document.getElementById('pickBack').addEventListener('click', e => { e.stopPropagation(); closePick(); });
 setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
   e.stopPropagation();
-  if (g.dataset.k === 'scenario') { if (CITY.scenario !== b.dataset.v) { CITY.scenario = b.dataset.v; if (stage === 'city') { populateCity(); resetScore(); } } }
+  if (g.dataset.k === 'timer') { if (TIMER.mode !== b.dataset.v) { TIMER.mode = b.dataset.v; resetScore(); } }
+  else if (g.dataset.k === 'scenario') { if (CITY.scenario !== b.dataset.v) { CITY.scenario = b.dataset.v; if (stage === 'city') { populateCity(); resetScore(); } } }
   else OPT[g.dataset.k] = b.dataset.v;
   syncSettings();
 })));
@@ -2558,21 +2567,43 @@ function updateBeams(dt, pxW) {
 
 // 標的に命中したとき：「+100」を着弾位置に浮かべ、「プツッ」と鳴らす（死んだ標的への追い撃ちは出さない）
 // 得点：命中の「+100」などを足していく。最高得点はステージ（都市は状況別）ごとにこの端末へ保存する
-const SCORE = { now: 0, best: 0 };
-const scoreKey = () => 'lr3d.best.' + stage + (stage === 'city' ? '.' + CITY.scenario : '');
+const SCORE = { now: 0, best: 0, shots: 0, hits: 0 };
+// 制限時間（60秒チャレンジ）：最初の1発で時間が動き出し、0になると撃てなくなって結果が出る
+const TIMER = { mode: 'off', running: false, over: false, left: 60 };
+const scoreKey = () => 'lr3d.best.' + stage + (stage === 'city' ? '.' + CITY.scenario : '') + (TIMER.mode === '60' ? '.t60' : '');
 function loadBest() { try { SCORE.best = +localStorage.getItem(scoreKey()) || 0; } catch { SCORE.best = 0; } }
 function updateScore() {
   if (SCORE.now > SCORE.best) { SCORE.best = SCORE.now; try { localStorage.setItem(scoreKey(), String(SCORE.best)); } catch {} }
   document.getElementById('scoreNow').textContent = SCORE.now; document.getElementById('scoreBest').textContent = SCORE.best;
 }
-function resetScore() { SCORE.now = 0; loadBest(); updateScore(); }
+function resetScore() {
+  SCORE.now = 0; SCORE.shots = 0; SCORE.hits = 0; loadBest(); updateScore();
+  TIMER.running = false; TIMER.over = false; TIMER.left = 60;
+  document.getElementById('timeUp').classList.remove('show'); showTimer();
+}
+function showTimer() {
+  const tl = document.getElementById('timeLine'); tl.hidden = TIMER.mode !== '60';
+  const el = document.getElementById('timeLeft'); el.textContent = Math.ceil(TIMER.left); el.classList.toggle('low', TIMER.left <= 10);
+}
+function updateTimer(dt) {
+  if (TIMER.mode !== '60' || !TIMER.running || TIMER.over) return;
+  TIMER.left = Math.max(0, TIMER.left - dt); showTimer();
+  if (TIMER.left <= 0) {
+    TIMER.over = true; updateScore();
+    document.getElementById('tuScore').textContent = SCORE.now + ' 点'; document.getElementById('tuBest').innerHTML = '最高 ' + SCORE.best + ' 点' + (SCORE.now > 0 && SCORE.now >= SCORE.best ? '（更新）' : '') + `<br><small>${SCORE.shots}発中 ${SCORE.hits}発命中（${SCORE.shots ? Math.round(SCORE.hits / SCORE.shots * 100) : 0}%）</small>`;
+    document.getElementById('timeUp').classList.add('show');
+  }
+}
+document.getElementById('tuAgain').addEventListener('click', e => { e.stopPropagation(); resetScore(); });
+['touchstart', 'mousedown'].forEach(ev => document.getElementById('timeUp').addEventListener(ev, e => e.stopPropagation(), { passive: true }));
 function hitConfirm(hit) {
   let pts = 0, heavy = false;
   if (hit.enemy) { pts = hit.zone === 'head' ? 150 : hit.zone === 'limb' ? 50 : 100; heavy = hit.zone === 'head'; }
   else if (hit.bear) { heavy = hit.zone === 'head' || hit.zone === 'vital'; pts = heavy ? 150 : 100; }
   else if (hit.obj.userData.pivot) pts = 100;
   if (!pts) return;
-  sfx.hit?.(heavy); SCORE.now += pts; updateScore();
+  if (TIMER.over) return;
+  sfx.hit?.(heavy); SCORE.now += pts; SCORE.hits++; updateScore();
   const hm = document.getElementById('hitmark'); hm.classList.remove('show', 'hi'); void hm.offsetWidth; hm.classList.add('show'); if (heavy) hm.classList.add('hi');   // 画面中央に×
   const q = hit.point.clone().project(camera);
   const el = document.createElement('div'); el.className = 'pop' + (heavy ? ' hi' : ''); el.textContent = '+' + pts;
@@ -2637,6 +2668,9 @@ function gunPointToWorld(local, out) {
   return out;
 }
 function fire() {
+  if (TIMER.over) return;                           // タイムアップ後は撃てない
+  SCORE.shots++;
+  if (TIMER.mode === '60' && !TIMER.running) TIMER.running = true;   // 最初の1発で時間が動き出す
   const now = performance.now() / 1000;
   if (S.reloading > 0) return;
   if (now - S.lastShot < (weapon.laser ? 0.11 : 0.16)) return;   // 半自動：1回押すたびに1発（レーザーは速め）
@@ -2884,7 +2918,7 @@ function tick() {
     if (k >= 1) { scene.remove(p.sp); p.sp.material.dispose(); puffs.splice(i, 1); }
   }
 
-  if (!frozen) { updateBears(dt); updateRings(dt); updateEnemies(dt); updateZone(dt); }
+  if (!frozen) { updateBears(dt); updateRings(dt); updateEnemies(dt); updateZone(dt); updateTimer(dt); }
   { const ms = 0.022 * 2 * Math.tan(camera.fov * Math.PI / 360);          // 画面の高さの約2%
     for (const e of enemies) { e.marker.visible = e.state !== 'down' && e.state !== 'falling'; e.marker.scale.setScalar(ms); }
     for (const b of bears) { b.marker.visible = b.state !== 'dead' && b.state !== 'dying'; b.marker.scale.setScalar(ms); } }
@@ -2968,5 +3002,5 @@ addEventListener('resize', () => {
 
 // テスト用の入口
 window.__gameReady?.();
-window.__game = { beams, enemies, OPS, stepBullet, get zero() { return ZERO_ANGLE; }, setStage, get stage() { return stage; }, setWeapon, get gunObj() { return gun; }, bears, setHunt, HUNT, fire, toggleAim, setZoom, reload, S, gun, HIP, camera, puffs, dial, setAmmo, rangefind, plates, decals, get ammo() { return ammo; }, bullets, trails, smoke, wind, ZERO_ANGLE, get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; } };
+window.__game = { TIMER, SCORE, beams, enemies, OPS, stepBullet, get zero() { return ZERO_ANGLE; }, setStage, get stage() { return stage; }, setWeapon, get gunObj() { return gun; }, bears, setHunt, HUNT, fire, toggleAim, setZoom, reload, S, gun, HIP, camera, puffs, dial, setAmmo, rangefind, plates, decals, get ammo() { return ammo; }, bullets, trails, smoke, wind, ZERO_ANGLE, get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; } };
 </script>
