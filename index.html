@@ -99,6 +99,11 @@
   #shot { font-variant-numeric: tabular-nums; }
   #shot b { color: var(--accent); }
   #shot .row { font-family: var(--num); font-size: 11px; opacity: 0.85; }
+  #hitmark { position: fixed; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; pointer-events: none; z-index: 29; opacity: 0; }
+  #hitmark::before, #hitmark::after { content: ""; position: absolute; left: 50%; top: 50%; width: 3px; height: 100%; margin-left: -1.5px; margin-top: -50%; background: #fff; box-shadow: 0 0 4px #000; border-radius: 2px; }
+  #hitmark::before { transform: rotate(45deg); } #hitmark::after { transform: rotate(-45deg); }
+  #hitmark.show { animation: hitMark 0.28s ease-out; } #hitmark.hi::before, #hitmark.hi::after { background: #ff4a3a; }
+  @keyframes hitMark { 0% { opacity: 1; transform: scale(1.5); } 100% { opacity: 0; transform: scale(0.85); } }
   .pop { position: fixed; z-index: 30; pointer-events: none; font: 700 20px var(--num); color: #ffe27a; letter-spacing: 0.02em;
     text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.7); animation: popUp 0.9s ease-out forwards; }
   .pop.hi { color: #ff9a4a; font-size: 24px; }
@@ -195,6 +200,7 @@
 </script>
 <canvas id="scope" hidden></canvas>
 <div id="flash"></div>
+<div id="hitmark"></div>
 <div id="hud">
   <div id="leftcol">
   <div id="info" class="panel">
@@ -2557,6 +2563,7 @@ function hitConfirm(hit) {
   else if (hit.obj.userData.pivot) pts = 100;
   if (!pts) return;
   sfx.hit?.(heavy); SCORE.now += pts; updateScore();
+  const hm = document.getElementById('hitmark'); hm.classList.remove('show', 'hi'); void hm.offsetWidth; hm.classList.add('show'); if (heavy) hm.classList.add('hi');   // 画面中央に×
   const q = hit.point.clone().project(camera);
   const el = document.createElement('div'); el.className = 'pop' + (heavy ? ' hi' : ''); el.textContent = '+' + pts;
   el.style.left = Math.max(30, Math.min(innerWidth - 30, (q.x * 0.5 + 0.5) * innerWidth)) + 'px';
