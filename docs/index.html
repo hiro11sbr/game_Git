@@ -188,12 +188,28 @@
   #rotate small { opacity: 0.7; }
   @media (orientation: portrait) and (max-width: 820px) { #rotate.show { display: flex; } }
 </style>
+<div id="loadErr" style="display:none;position:fixed;inset:0;z-index:99;align-items:center;justify-content:center;flex-direction:column;gap:10px;padding:24px;box-sizing:border-box;text-align:center;background:#14161a;color:#eef0e8;font:15px/1.7 -apple-system,'Hiragino Sans',sans-serif"></div>
+<script>
+(function () {   // ゲーム本体は外部の three.js を読み込む。読み込めない場合は理由を画面に出す
+  var box = document.getElementById('loadErr'), done = false;
+  function show(t) { if (done) return; box.innerHTML = t; box.style.display = 'flex'; }
+  window.__gameReady = function () { done = true; box.style.display = 'none'; };
+  if (window.HTMLScriptElement && HTMLScriptElement.supports && !HTMLScriptElement.supports('importmap')) {
+    show('<b style="font-size:18px">このブラウザでは動きません</b><span>iPhone・iPadは iOS 16.4 以降、<br>PCのSafariは 16.4 以降が必要です。<br><small>（設定 → 一般 → ソフトウェア・アップデート）</small></span>');
+  }
+  addEventListener('error', function (e) {
+    if (e && e.target && e.target.tagName === 'SCRIPT') show('<b style="font-size:18px">読み込みに失敗しました</b><span>通信状況を確認して、ページを再読み込みしてください。<br><small>広告ブロックなどが外部の部品(three.js)を止めている場合もあります。</small></span>');
+  }, true);
+  setTimeout(function () { if (!done && !window.__gameReady.skip) show('<b style="font-size:18px">読み込みに時間がかかっています</b><span>通信状況を確認して、ページを再読み込みしてください。</span>'); }, 15000);
+})();
+</script>
 <canvas id="scope" hidden></canvas>
 <div id="flash"></div>
 <div id="hud">
   <div id="leftcol">
   <div id="info" class="panel">
     <div><b id="modeName">射撃場</b></div>
+    <div id="scoreLine">得点 <b id="scoreNow">0</b>・最高 <b id="scoreBest">0</b></div>
     <div id="pos">—</div>
     <div id="wind"><span id="windArrow">↑</span> <span id="windTxt">風 —</span></div>
   </div>
@@ -826,6 +842,7 @@ function setStage(st, quiet) {
   if (huntMode) for (let i = 0; i < 3; i++) spawnBear();
   while (enemies.length) removeEnemy(enemies[0]);
   if (st === 'city') populateCity();
+  resetScore();
   if (st === 'city') { camera.position.set(0, CITY_ROOF + EYE_H + 0.2, -8.2); yaw = 0; pitch = 0; if (weaponIdx === 0 && !quiet) setWeapon(1); }
   else camera.position.set(0, EYE_H + 0.2, 2);
 }
@@ -1752,7 +1769,7 @@ setEl.querySelectorAll('.cat').forEach(c => c.addEventListener('click', e => { e
 document.getElementById('pickBack').addEventListener('click', e => { e.stopPropagation(); closePick(); });
 setEl.querySelectorAll('.opts').forEach(g => g.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
   e.stopPropagation();
-  if (g.dataset.k === 'scenario') { if (CITY.scenario !== b.dataset.v) { CITY.scenario = b.dataset.v; if (stage === 'city') populateCity(); } }
+  if (g.dataset.k === 'scenario') { if (CITY.scenario !== b.dataset.v) { CITY.scenario = b.dataset.v; if (stage === 'city') { populateCity(); resetScore(); } } }
   else OPT[g.dataset.k] = b.dataset.v;
   syncSettings();
 })));
@@ -2534,13 +2551,22 @@ function updateBeams(dt, pxW) {
 }
 
 // 標的に命中したとき：「+100」を着弾位置に浮かべ、「プツッ」と鳴らす（死んだ標的への追い撃ちは出さない）
+// 得点：命中の「+100」などを足していく。最高得点はステージ（都市は状況別）ごとにこの端末へ保存する
+const SCORE = { now: 0, best: 0 };
+const scoreKey = () => 'lr3d.best.' + stage + (stage === 'city' ? '.' + CITY.scenario : '');
+function loadBest() { try { SCORE.best = +localStorage.getItem(scoreKey()) || 0; } catch { SCORE.best = 0; } }
+function updateScore() {
+  if (SCORE.now > SCORE.best) { SCORE.best = SCORE.now; try { localStorage.setItem(scoreKey(), String(SCORE.best)); } catch {} }
+  document.getElementById('scoreNow').textContent = SCORE.now; document.getElementById('scoreBest').textContent = SCORE.best;
+}
+function resetScore() { SCORE.now = 0; loadBest(); updateScore(); }
 function hitConfirm(hit) {
   let pts = 0, heavy = false;
   if (hit.enemy) { pts = hit.zone === 'head' ? 150 : hit.zone === 'limb' ? 50 : 100; heavy = hit.zone === 'head'; }
   else if (hit.bear) { heavy = hit.zone === 'head' || hit.zone === 'vital'; pts = heavy ? 150 : 100; }
   else if (hit.obj.userData.pivot) pts = 100;
   if (!pts) return;
-  sfx.hit?.(heavy);
+  sfx.hit?.(heavy); SCORE.now += pts; updateScore();
   const q = hit.point.clone().project(camera);
   const el = document.createElement('div'); el.className = 'pop' + (heavy ? ' hi' : ''); el.textContent = '+' + pts;
   el.style.left = Math.max(30, Math.min(innerWidth - 30, (q.x * 0.5 + 0.5) * innerWidth)) + 'px';
@@ -2934,5 +2960,6 @@ addEventListener('resize', () => {
 });
 
 // テスト用の入口
+window.__gameReady?.();
 window.__game = { beams, enemies, OPS, stepBullet, get zero() { return ZERO_ANGLE; }, setStage, get stage() { return stage; }, setWeapon, get gunObj() { return gun; }, bears, setHunt, HUNT, fire, toggleAim, setZoom, reload, S, gun, HIP, camera, puffs, dial, setAmmo, rangefind, plates, decals, get ammo() { return ammo; }, bullets, trails, smoke, wind, ZERO_ANGLE, get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; } };
 </script>
