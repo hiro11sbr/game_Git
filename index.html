@@ -2068,17 +2068,17 @@ const traceUniforms = { tScene: { value: sceneRT.texture }, uRes: { value: new T
 const traceMat = new THREE.ShaderMaterial({
   uniforms: traceUniforms, transparent: false, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
   vertexShader: `
-    attribute float aAlpha; attribute float aSide; attribute float aDist;
-    varying float vAlpha; varying float vSide; varying float vDist;
-    void main(){ vAlpha=aAlpha; vSide=aSide; vDist=aDist; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    attribute float aAlpha; attribute float aSide; attribute float aDist; attribute float aWid; attribute float aVis;
+    varying float vAlpha; varying float vSide; varying float vDist; varying float vWid;
+    void main(){ vAlpha=aAlpha*aVis; vSide=aSide; vDist=aDist; vWid=aWid; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
   fragmentShader: `
     uniform sampler2D tScene; uniform vec2 uRes; uniform float uTime; uniform float uStrength;
-    varying float vAlpha; varying float vSide; varying float vDist;
+    varying float vAlpha; varying float vSide; varying float vDist; varying float vWid;
     float h(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
     float n2(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
       return mix(mix(h(i),h(i+vec2(1,0)),u.x), mix(h(i+vec2(0,1)),h(i+vec2(1,1)),u.x), u.y); }
     void main(){
-      float across = 1.0 - abs(vSide);
+      float across = clamp(1.0 - abs(vSide) / max(vWid, 0.02), 0.0, 1.0);   // 帯の中の、もやが実際に占める幅だけを使う
       float a = vAlpha * smoothstep(0.0, 1.0, across);   // 弾道の軸が一番濃く、外へ向かって滑らかに消える
       vec2 q = vec2(vDist*0.35 - uTime*9.0, vSide*1.6);
       vec2 n = vec2(n2(q), n2(q+vec2(19.3,7.1))) - 0.5;
@@ -2106,6 +2106,8 @@ function makeTrail() {
   geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 2), 1).setUsage(THREE.DynamicDrawUsage));
   geo.setAttribute('aSide', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 2), 1));
   geo.setAttribute('aDist', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 2), 1).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('aWid', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 2).fill(1), 1).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('aVis', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 2).fill(1), 1).setUsage(THREE.DynamicDrawUsage));
   const side = geo.attributes.aSide.array; for (let i = 0; i < TRAIL_MAX; i++) { side[i * 2] = -1; side[i * 2 + 1] = 1; }
   const idx = []; for (let i = 0; i < TRAIL_MAX - 1; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
   geo.setIndex(idx);
@@ -2115,11 +2117,16 @@ function makeTrail() {
 }
 const trails = [];
 const tv = { a: new THREE.Vector3(), b: new THREE.Vector3(), c: new THREE.Vector3(), d: new THREE.Vector3() };
+// 弾道のもや（衝撃波による空気のゆがみ）。太さは約20cmと仮定（実測値は見つからず、えんちゃんの感覚で設定）。
+// 見えやすさは「倍率×太さ÷距離」で決める：高倍率で覗くほど見え、遠い・低倍率・腰だめでは見えない。
+// 画面の解像度は人の目より粗いので、見えるときは最低2.5pxの幅で描く（光る弾筋は別扱いで常に見える）
+const HAZE_WIDTH_M = 0.2;
 function updateTrail(tr, now, pxW) {
   // 古い点を捨てる
   while (tr.pts.length > 2 && now - tr.pts[0].t > TRAIL_SEC) tr.pts.shift();
   while (tr.pts.length > TRAIL_MAX) tr.pts.shift();
-  const geo = tr.mesh.geometry, P = geo.attributes.position.array, A = geo.attributes.aAlpha.array, D = geo.attributes.aDist.array;
+  const geo = tr.mesh.geometry, P = geo.attributes.position.array, A = geo.attributes.aAlpha.array, D = geo.attributes.aDist.array, WD = geo.attributes.aWid.array, VS = geo.attributes.aVis.array;
+  const radPerPx = pxW / 9;                                        // 1ピクセルが見込む角度（現在の倍率）
   const n = tr.pts.length, deadFade = tr.dead < 0 ? 1 : Math.max(0, 1 - (now - tr.dead) / 0.35);
   for (let i = 0; i < n; i++) {
     const p = tr.pts[i].p, prev = tr.pts[Math.max(0, i - 1)].p, next = tr.pts[Math.min(n - 1, i + 1)].p;
@@ -2129,17 +2136,20 @@ function updateTrail(tr, now, pxW) {
     tv.c.crossVectors(tv.a, tv.b);
     if (tv.c.lengthSq() < 1e-6) tv.c.set(1, 0, 0).applyQuaternion(camera.quaternion);
     tv.c.normalize();
-    const w = Math.min(2, dist * pxW * 0.62);                      // 画面上でおよそ一定の太さ（以前より細く）
+    const w = Math.min(2, dist * pxW * 0.62);                      // 光る弾筋用の帯（画面上でおよそ一定の太さ）
+    const ribbonPx = 2 * w / (dist * radPerPx || 1), hazePx = HAZE_WIDTH_M / ((dist * radPerPx) || 1);
+    const k = Math.min(1, Math.max(0, ((S.aimT > 0.9 ? zoom : 1) * HAZE_WIDTH_M / (dist || 1) - 1.6e-3) / 6.4e-3));   // 見えやすさ（0〜1）
+    const wid = Math.min(1, Math.max(hazePx, 2.5) / (ribbonPx || 1)), vis = k * k * (3 - 2 * k);
     const age = (now - tr.pts[i].t) / TRAIL_SEC;
     const fadeIn = Math.min(1, Math.max(0, (dist - 2) / 12));      // 銃口のすぐ前は出さない
     const a = Math.pow(Math.max(0, 1 - age), 0.6) * deadFade * fadeIn;
     for (let s = 0; s < 2; s++) {
       const k = (i * 2 + s) * 3, sg = s ? 1 : -1;
       P[k] = p.x + tv.c.x * w * sg; P[k + 1] = p.y + tv.c.y * w * sg; P[k + 2] = p.z + tv.c.z * w * sg;
-      A[i * 2 + s] = a; D[i * 2 + s] = tr.pts[i].d;
+      A[i * 2 + s] = a; D[i * 2 + s] = tr.pts[i].d; WD[i * 2 + s] = wid; VS[i * 2 + s] = vis;
     }
   }
-  geo.attributes.position.needsUpdate = geo.attributes.aAlpha.needsUpdate = geo.attributes.aDist.needsUpdate = true;
+  geo.attributes.position.needsUpdate = geo.attributes.aAlpha.needsUpdate = geo.attributes.aDist.needsUpdate = geo.attributes.aWid.needsUpdate = geo.attributes.aVis.needsUpdate = true;
   geo.setDrawRange(0, Math.max(0, (n - 1) * 6));
   return deadFade > 0;
 }
