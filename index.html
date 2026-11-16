@@ -212,7 +212,7 @@
   <div id="leftcol">
   <div id="info" class="panel">
     <div><b id="modeName">射撃場</b></div>
-    <div id="scoreLine">得点 <b id="scoreNow">0</b>・最高 <b id="scoreBest">0</b><span id="timeLine" hidden>・残り <b id="timeLeft">60</b>秒</span></div>
+    <div id="scoreLine">得点 <b id="scoreNow">0</b>・最高 <b id="scoreBest">0</b><span id="timeLine" hidden>・残り <b id="timeLeft">30</b>秒</span></div>
     <div id="pos">—</div>
     <div id="wind"><span id="windArrow">↑</span> <span id="windTxt">風 —</span></div>
   </div>
@@ -255,7 +255,7 @@
     </div>
     <ul class="list" id="optList">
       <li>弾筋：<span class="opts" data-k="tracer"><button data-v="none">なし</button><button data-v="white">白</button><button data-v="red">赤</button></span></li>
-      <li>制限時間：<span class="opts" data-k="timer"><button data-v="off">なし</button><button data-v="60">60秒チャレンジ</button></span></li>
+      <li>制限時間：<span class="opts" data-k="timer"><button data-v="off">なし</button><button data-v="30">30秒チャレンジ</button></span></li>
       <li id="scenLi">都市の状況：<span class="opts" data-k="scenario"><button data-v="casual">カジュアル（敵多数）</button><button data-v="long">長距離（敵1人）</button></span></li>
       <li>通過点マーク：<span class="opts" data-k="wall"><button data-v="on">表示する</button><button data-v="off">表示しない</button></span></li>
     </ul>
@@ -2558,9 +2558,9 @@ function updateBeams(dt, pxW) {
 // 標的に命中したとき：「+100」を着弾位置に浮かべ、「プツッ」と鳴らす（死んだ標的への追い撃ちは出さない）
 // 得点：命中の「+100」などを足していく。最高得点はステージ（都市は状況別）ごとにこの端末へ保存する
 const SCORE = { now: 0, best: 0, shots: 0, hits: 0 };
-// 制限時間（60秒チャレンジ）：最初の1発で時間が動き出し、0になると撃てなくなって結果が出る
-const TIMER = { mode: 'off', running: false, over: false, left: 60 };
-const scoreKey = () => 'lr3d.best.' + stage + (stage === 'city' ? '.' + CITY.scenario : '') + (TIMER.mode === '60' ? '.t60' : '');
+// 制限時間（30秒チャレンジ）：最初の1発で時間が動き出し、0になると撃てなくなって結果が出る
+const TIMER = { mode: 'off', running: false, over: false, left: 30 };
+const scoreKey = () => 'lr3d.best.' + stage + (stage === 'city' ? '.' + CITY.scenario : '') + (TIMER.mode === '30' ? '.t30' : '');
 function loadBest() { try { SCORE.best = +localStorage.getItem(scoreKey()) || 0; } catch { SCORE.best = 0; } }
 function updateScore() {
   if (SCORE.now > SCORE.best) { SCORE.best = SCORE.now; try { localStorage.setItem(scoreKey(), String(SCORE.best)); } catch {} }
@@ -2568,15 +2568,16 @@ function updateScore() {
 }
 function resetScore() {
   SCORE.now = 0; SCORE.shots = 0; SCORE.hits = 0; loadBest(); updateScore();
-  TIMER.running = false; TIMER.over = false; TIMER.left = 60;
+  TIMER.running = false; TIMER.over = false; TIMER.left = 30;
   document.getElementById('timeUp').classList.remove('show'); showTimer();
 }
 function showTimer() {
-  const tl = document.getElementById('timeLine'); tl.hidden = TIMER.mode !== '60';
+  const tl = document.getElementById('timeLine'); tl.hidden = TIMER.mode !== '30';
   const el = document.getElementById('timeLeft'); el.textContent = Math.ceil(TIMER.left); el.classList.toggle('low', TIMER.left <= 10);
 }
 function updateTimer(dt) {
-  if (TIMER.mode !== '60' || !TIMER.running || TIMER.over) return;
+  if (TIMER.mode !== '30' || !TIMER.running || TIMER.over) return;
+  if (!setEl.hidden) return;                         // 設定画面を開いている間は止める
   TIMER.left = Math.max(0, TIMER.left - dt); showTimer();
   if (TIMER.left <= 0) {
     TIMER.over = true; updateScore();
@@ -2660,7 +2661,7 @@ function gunPointToWorld(local, out) {
 function fire() {
   if (TIMER.over) return;                           // タイムアップ後は撃てない
   SCORE.shots++;
-  if (TIMER.mode === '60' && !TIMER.running) TIMER.running = true;   // 最初の1発で時間が動き出す
+  if (TIMER.mode === '30' && !TIMER.running) TIMER.running = true;   // 最初の1発で時間が動き出す
   const now = performance.now() / 1000;
   if (S.reloading > 0) return;
   if (now - S.lastShot < (weapon.laser ? 0.11 : 0.16)) return;   // 半自動：1回押すたびに1発（レーザーは速め）
