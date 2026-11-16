@@ -115,6 +115,7 @@
   #timeUp .big { font: 700 34px var(--num); color: var(--accent); margin: 4px 0; }
   #timeUp button { font: inherit; margin-top: 8px; padding: 6px 18px; border-radius: 8px; border: 1px solid var(--hud-line); background: var(--btn-on); color: #14160f; font-weight: 700; }
   #timeLine b.low { color: #ff5a3a; }
+  #vignette { position: fixed; inset: 0; z-index: 2; pointer-events: none; background: radial-gradient(ellipse at 50% 48%, rgba(0,0,0,0) 58%, rgba(0,0,0,0.26) 100%); }
   #hitmark { position: fixed; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; pointer-events: none; z-index: 29; opacity: 0; }
   #hitmark::before, #hitmark::after { content: ""; position: absolute; left: 50%; top: 50%; width: 3px; height: 100%; margin-left: -1.5px; margin-top: -50%; background: #fff; box-shadow: 0 0 4px #000; border-radius: 2px; }
   #hitmark::before { transform: rotate(45deg); } #hitmark::after { transform: rotate(-45deg); }
@@ -216,6 +217,7 @@
 </script>
 <canvas id="scope" hidden></canvas>
 <div id="flash"></div>
+<div id="vignette"></div>
 <div id="hitmark"></div>
 <div id="timeUp"><div class="box"><div>タイムアップ</div><div class="big" id="tuScore">0</div><div id="tuBest">最高 0</div><button id="tuAgain" type="button">もう一度</button></div></div>
 <div id="hud">
@@ -342,10 +344,27 @@ let skyMat = null;
   const geo = new THREE.SphereGeometry(10000, 32, 16);
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false,
-    uniforms: { top: { value: new THREE.Color(0x3d72b0) }, horizon: { value: FOG_COLOR } },
+    uniforms: { top: { value: new THREE.Color(0x3d72b0) }, horizon: { value: FOG_COLOR }, sunDir: { value: new THREE.Vector3(-300, 500, 200).normalize() }, uTime: { value: 0 } },
     vertexShader: `varying vec3 vP; void main(){ vP = normalize(position); gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-    fragmentShader: `uniform vec3 top; uniform vec3 horizon; varying vec3 vP;
-      void main(){ float t = clamp(vP.y*2.2, 0.0, 1.0); gl_FragColor = vec4(mix(horizon, top, pow(t,0.7)), 1.0); }`
+    fragmentShader: `uniform vec3 top; uniform vec3 horizon; uniform vec3 sunDir; uniform float uTime; varying vec3 vP;
+      float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+      float vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+        return mix(mix(h2(i),h2(i+vec2(1.0,0.0)),f.x), mix(h2(i+vec2(0.0,1.0)),h2(i+vec2(1.0,1.0)),f.x), f.y); }
+      void main(){
+        vec3 v = normalize(vP);
+        float t = clamp(v.y*2.2, 0.0, 1.0);
+        vec3 col = mix(horizon, top, pow(t,0.7));
+        if (v.y > 0.012) {                                   // 雲：空を平面に見立てて薄く流す（地平線ほど細かく遠く見える）
+          vec2 uv = v.xz / (v.y + 0.16) * 2.6 + vec2(uTime*0.006, uTime*0.002);
+          float n = vn(uv)*0.58 + vn(uv*2.3+7.0)*0.3 + vn(uv*5.1+3.0)*0.12;
+          float c = smoothstep(0.5, 0.78, n) * smoothstep(0.012, 0.16, v.y);
+          vec3 cc = mix(vec3(1.0,0.985,0.95), vec3(0.74,0.79,0.86), smoothstep(0.55,0.92,n));   // 雲の底は少し灰色
+          col = mix(col, cc, c*0.82);
+        }
+        float s = max(dot(v, normalize(sunDir)), 0.0);        // 太陽と光のにじみ
+        col += vec3(1.0,0.86,0.62) * (pow(s,900.0)*2.6 + pow(s,48.0)*0.2 + pow(s,6.0)*0.05);
+        gl_FragColor = vec4(col, 1.0);
+      }`
   });
   const sky = new THREE.Mesh(geo, mat); sky.renderOrder = -1; sky.frustumCulled = false; sky.userData.keep = true; skyMat = mat;
   scene.add(sky);
@@ -377,6 +396,21 @@ function rangeHeightAt(x, z) {
 }
 const hitables = [];
 let rangeGround = null, cityGround = null, activeGround = null;
+// 地面の細かい模様（草の葉・砂粒・小石）。平均が少し暗い灰色の模様を、頂点の色に掛けて使う
+function groundDetailTex(seed, rep) {
+  const N = 256, c = document.createElement('canvas'); c.width = c.height = N; const g = c.getContext('2d');
+  g.fillStyle = '#e8e8e8'; g.fillRect(0, 0, N, N);
+  let sd = seed; const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 2600; i++) {                      // 細い葉・粒（明暗）
+    const x = r() * N, y = r() * N, l = 2 + r() * 7, a = r() * 6.28, v = r() < 0.5 ? 150 + r() * 50 : 235 + r() * 20;
+    g.strokeStyle = `rgba(${v | 0},${v | 0},${v | 0},0.55)`; g.lineWidth = 0.7 + r() * 0.8; g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+  }
+  for (let i = 0; i < 40; i++) {                         // 大きめのむら
+    const x = r() * N, y = r() * N, rad = 12 + r() * 30, gr = g.createRadialGradient(x, y, 0, x, y, rad), k = r() < 0.5 ? 120 : 255;
+    gr.addColorStop(0, `rgba(${k},${k},${k},0.16)`); gr.addColorStop(1, `rgba(${k},${k},${k},0)`); g.fillStyle = gr; g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4; t.repeat.set(rep, rep); return t;
+}
 const rangeProps = [];   // 射撃場だけに置く物（猟場では隠す）
 {
   const size = 8400, seg = 270;
@@ -395,7 +429,7 @@ const rangeProps = [];   // 射撃場だけに置く物（猟場では隠す）
   }
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   geo.computeVertexNormals();
-  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: groundDetailTex(11, size / 5), color: new THREE.Color(1.2, 1.2, 1.2) }));
   ground.name = 'ground'; ground.userData = { kind: '地面', mat: 'dirt' }; rangeGround = ground;
   scene.add(ground);
   hitables.push(ground);
@@ -539,7 +573,7 @@ const TARGET = { x: 40, z: -3548, h: 14 };   // 射撃位置（z=-8）から3,54
     col.push(c.r, c.g, c.b);
   }
   geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); geo.computeVertexNormals();
-  const g = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const g = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: groundDetailTex(23, size / 6), color: new THREE.Color(1.2, 1.2, 1.2) }));
   g.name = 'ground'; g.userData = { kind: '地面', mat: 'dirt' }; cityGroup.add(g); hitables.push(g); cityGround = g;
   // 川の水面
   const water = new THREE.Mesh(new THREE.PlaneGeometry(9000, 124), new THREE.MeshStandardMaterial({ color: 0x5b7275, roughness: 0.15, metalness: 0.3 }));
@@ -2965,7 +2999,7 @@ function tick() {
   renderer.setRenderTarget(null); renderer.clear(); renderer.render(copyScene, orthoCam);
   if (beams.length) updateBeams(frozen ? 0 : dt, 2 * Math.tan(camera.fov * Math.PI / 360) / innerHeight * 7);
   if (trails.length || beams.length || ZONE.t >= 0) {
-    traceUniforms.uTime.value = t0;
+    traceUniforms.uTime.value = t0; skyMat.uniforms.uTime.value = t0;
     const pxW = 2 * Math.tan(camera.fov * Math.PI / 360) / innerHeight * 9;   // 太さ約18px
     for (let i = trails.length - 1; i >= 0; i--) {
       if (!updateTrail(trails[i], simNow, pxW)) { traceScene.remove(trails[i].mesh); traceScene.remove(trails[i].glow); trails[i].mesh.geometry.dispose(); trails.splice(i, 1); }
@@ -3013,5 +3047,5 @@ addEventListener('resize', () => {
 
 // テスト用の入口
 window.__gameReady?.();
-window.__game = { TIMER, SCORE, beams, enemies, OPS, stepBullet, get zero() { return ZERO_ANGLE; }, setStage, get stage() { return stage; }, setWeapon, get gunObj() { return gun; }, bears, setHunt, HUNT, fire, toggleAim, setZoom, reload, S, gun, HIP, camera, puffs, dial, setAmmo, rangefind, plates, decals, get ammo() { return ammo; }, bullets, trails, smoke, wind, ZERO_ANGLE, get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; } };
+window.__game = { scene, TIMER, SCORE, beams, enemies, OPS, stepBullet, get zero() { return ZERO_ANGLE; }, setStage, get stage() { return stage; }, setWeapon, get gunObj() { return gun; }, bears, setHunt, HUNT, fire, toggleAim, setZoom, reload, S, gun, HIP, camera, puffs, dial, setAmmo, rangefind, plates, decals, get ammo() { return ammo; }, bullets, trails, smoke, wind, ZERO_ANGLE, get yaw() { return yaw; }, set yaw(v) { yaw = v; }, get pitch() { return pitch; }, set pitch(v) { pitch = v; } };
 </script>
